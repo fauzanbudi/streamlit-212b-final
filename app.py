@@ -13,7 +13,24 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from ucimlrepo import fetch_ucirepo
 from sklearn.preprocessing import LabelEncoder
+from sklearn.model_selection import train_test_split, StratifiedKFold, GridSearchCV
+from sklearn.compose import ColumnTransformer
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import OneHotEncoder, StandardScaler
+from sklearn.impute import SimpleImputer
+from sklearn.metrics import roc_auc_score
+from sklearn.linear_model import LogisticRegression
+from sklearn.ensemble import RandomForestClassifier
 import io
+
+try:
+    from xgboost import XGBClassifier
+    XGBOOST_AVAILABLE = True
+except Exception:
+    XGBOOST_AVAILABLE = False
+
+
+MODEL_RESULTS_CSV = Path(__file__).with_name('model_results.csv')
 
 # Page configuration
 st.set_page_config(
@@ -223,58 +240,226 @@ def load_column_definitions_lookup(csv_path: Path) -> dict:
     }
 
 @st.cache_data
-def load_model_results():
-    """Load or create model results data"""
-    # For demonstration, we'll create sample results
-    # In production, you would load your actual CSV files
-    np.random.seed(42)
-    
-    n_configs = 30
-    
-    # Logistic Regression results
-    log_results = pd.DataFrame({
-        'model_type': ['Logistic Regression'] * n_configs,
-        'mean': np.random.uniform(0.65, 0.85, n_configs),
-        'std_err': np.random.uniform(0.02, 0.08, n_configs),
-        'n': [200] * n_configs,
-        '.config': [f'Config_{i}' for i in range(n_configs)],
-        'penalty': np.random.choice(['l1', 'l2', 'elasticnet'], n_configs),
-        'mixture': np.random.uniform(0, 1, n_configs),
-        'C': np.random.choice([0.1, 0.5, 1.0, 10.0], n_configs)
-    })
-    
-    # Random Forest results
-    rf_results = pd.DataFrame({
-        'model_type': ['Random Forest'] * n_configs,
-        'mean': np.random.uniform(0.70, 0.90, n_configs),
-        'std_err': np.random.uniform(0.02, 0.07, n_configs),
-        'n': [200] * n_configs,
-        '.config': [f'Config_{i}' for i in range(n_configs, 2*n_configs)],
-        'mtry': np.random.choice([2, 3, 4, 5, 6], n_configs),
-        'trees': np.random.choice([100, 200, 300, 500], n_configs),
-        'min_n': np.random.choice([1, 5, 10, 20], n_configs)
-    })
-    
-    # XGBoost results
-    xgb_results = pd.DataFrame({
-        'model_type': ['XGBoost'] * n_configs,
-        'mean': np.random.uniform(0.72, 0.92, n_configs),
-        'std_err': np.random.uniform(0.02, 0.06, n_configs),
-        'n': [200] * n_configs,
-        '.config': [f'Config_{i}' for i in range(2*n_configs, 3*n_configs)],
-        'learn_rate': np.random.choice([0.01, 0.05, 0.1, 0.2], n_configs),
-        'tree_depth': np.random.choice([3, 4, 5, 6, 7], n_configs),
-        'mtry': np.random.choice([2, 3, 4, 5, 6], n_configs)
-    })
-    
-    # Combine all results
-    all_results = pd.concat([log_results, rf_results, xgb_results], ignore_index=True)
-    
-    return all_results
+def load_model_results(dataframe: pd.DataFrame, force_rebuild: bool = False) -> pd.DataFrame:
+    """Load model results from CSV, or build/train models and save results first."""
+    required_cols = {'model_type', 'mean', 'std_err', 'n', '.config', 'test_auc'}
+
+    if MODEL_RESULTS_CSV.exists() and not force_rebuild:
+        try:
+            cached = pd.read_csv(MODEL_RESULTS_CSV)
+            if required_cols.issubset(cached.columns):
+                return cached
+        except Exception:
+            pass
+
+    results = build_and_store_model_results(dataframe)
+    return results
+
+
+def _infer_target_column(dataframe: pd.DataFrame) -> str:
+    """Infer the target column with preference to common classification names."""
+    preferred = ['grade', 'class', 'target', 'label', 'outcome', 'diagnosis']
+    lower_lookup = {col.lower(): col for col in dataframe.columns}
+
+    for name in preferred:
+        if name in lower_lookup:
+            return lower_lookup[name]
+
+    return dataframe.columns[-1]
+
+
+def _fit_and_collect_results(
+    model_type: str,
+    estimator,
+    param_grid: list,
+    preprocessor: ColumnTransformer,
+    X_train: pd.DataFrame,
+    y_train: np.ndarray,
+    X_test: pd.DataFrame,
+    y_test: np.ndarray,
+    cv
+) -> pd.DataFrame:
+    """Fit a CV model search and collect all grid results plus test AUC for best model."""
+    pipe = Pipeline([
+        ('preprocess', preprocessor),
+        ('model', estimator)
+    ])
+
+    search = GridSearchCV(
+        estimator=pipe,
+        param_grid=param_grid,
+        scoring='roc_auc',
+        cv=cv,
+        n_jobs=-1,
+        return_train_score=False,
+        refit=True
+    )
+    search.fit(X_train, y_train)
+
+    y_proba = search.best_estimator_.predict_proba(X_test)[:, 1]
+    test_auc = roc_auc_score(y_test, y_proba)
+
+    rows = []
+    cv_results = pd.DataFrame(search.cv_results_)
+    for idx, row in cv_results.iterrows():
+        params = row['params']
+        result_row = {
+            'model_type': model_type,
+            'mean': float(row['mean_test_score']),
+            'std_err': float(row['std_test_score'] / np.sqrt(cv.get_n_splits())),
+            'n': int(len(X_train)),
+            '.config': f'{model_type.replace(" ", "_")}_{idx + 1}',
+            'is_best': bool(row['rank_test_score'] == 1),
+            'test_auc': float(test_auc if row['rank_test_score'] == 1 else np.nan),
+            'train_rows': int(len(X_train)),
+            'test_rows': int(len(X_test)),
+            'cv_folds': int(cv.get_n_splits())
+        }
+
+        if model_type == 'Logistic Regression':
+            result_row['penalty'] = params.get('model__penalty')
+            result_row['mixture'] = params.get('model__l1_ratio')
+            result_row['C'] = params.get('model__C')
+        elif model_type == 'Random Forest':
+            result_row['mtry'] = params.get('model__max_features')
+            result_row['trees'] = params.get('model__n_estimators')
+            result_row['min_n'] = params.get('model__min_samples_leaf')
+        elif model_type == 'XGBoost':
+            result_row['learn_rate'] = params.get('model__learning_rate')
+            result_row['tree_depth'] = params.get('model__max_depth')
+            result_row['mtry'] = params.get('model__colsample_bytree')
+
+        rows.append(result_row)
+
+    return pd.DataFrame(rows)
+
+
+@st.cache_data(show_spinner=True)
+def build_and_store_model_results(dataframe: pd.DataFrame) -> pd.DataFrame:
+    """Run 70/30 train-test modeling with 10-fold CV and persist model performance to CSV."""
+    work_df = dataframe.copy()
+    target_col = _infer_target_column(work_df)
+
+    work_df = work_df.dropna(subset=[target_col])
+    X = work_df.drop(columns=[target_col]).copy()
+    y_raw = work_df[target_col].astype(str)
+
+    # Drop obvious identifier fields from modeling.
+    id_cols = [c for c in X.columns if 'id' in c.lower()]
+    if id_cols:
+        X = X.drop(columns=id_cols)
+
+    y_encoded = LabelEncoder().fit_transform(y_raw)
+
+    X_train, X_test, y_train, y_test = train_test_split(
+        X,
+        y_encoded,
+        test_size=0.30,
+        random_state=42,
+        stratify=y_encoded
+    )
+
+    cv = StratifiedKFold(n_splits=10, shuffle=True, random_state=42)
+
+    num_cols = X_train.select_dtypes(include=[np.number]).columns.tolist()
+    cat_cols = [c for c in X_train.columns if c not in num_cols]
+
+    preprocessor = ColumnTransformer(
+        transformers=[
+            ('num', Pipeline([
+                ('imputer', SimpleImputer(strategy='median')),
+                ('scaler', StandardScaler())
+            ]), num_cols),
+            ('cat', Pipeline([
+                ('imputer', SimpleImputer(strategy='most_frequent')),
+                ('encoder', OneHotEncoder(handle_unknown='ignore'))
+            ]), cat_cols)
+        ],
+        remainder='drop'
+    )
+
+    all_results = []
+
+    log_grid = [
+        {
+            'model__penalty': ['l1', 'l2'],
+            'model__C': [0.1, 1.0, 10.0]
+        },
+        {
+            'model__penalty': ['elasticnet'],
+            'model__l1_ratio': [0.25, 0.5, 0.75],
+            'model__C': [0.1, 1.0, 10.0]
+        }
+    ]
+
+    all_results.append(
+        _fit_and_collect_results(
+            model_type='Logistic Regression',
+            estimator=LogisticRegression(max_iter=4000, solver='saga', random_state=42),
+            param_grid=log_grid,
+            preprocessor=preprocessor,
+            X_train=X_train,
+            y_train=y_train,
+            X_test=X_test,
+            y_test=y_test,
+            cv=cv
+        )
+    )
+
+    rf_grid = [{
+        'model__n_estimators': [200, 500],
+        'model__max_features': ['sqrt', 0.5],
+        'model__min_samples_leaf': [1, 5]
+    }]
+
+    all_results.append(
+        _fit_and_collect_results(
+            model_type='Random Forest',
+            estimator=RandomForestClassifier(random_state=42),
+            param_grid=rf_grid,
+            preprocessor=preprocessor,
+            X_train=X_train,
+            y_train=y_train,
+            X_test=X_test,
+            y_test=y_test,
+            cv=cv
+        )
+    )
+
+    if XGBOOST_AVAILABLE:
+        xgb_grid = [{
+            'model__n_estimators': [200, 400],
+            'model__learning_rate': [0.05, 0.1],
+            'model__max_depth': [3, 5],
+            'model__colsample_bytree': [0.7, 1.0]
+        }]
+
+        all_results.append(
+            _fit_and_collect_results(
+                model_type='XGBoost',
+                estimator=XGBClassifier(
+                    objective='binary:logistic',
+                    eval_metric='auc',
+                    random_state=42,
+                    n_jobs=1
+                ),
+                param_grid=xgb_grid,
+                preprocessor=preprocessor,
+                X_train=X_train,
+                y_train=y_train,
+                X_test=X_test,
+                y_test=y_test,
+                cv=cv
+            )
+        )
+
+    combined = pd.concat(all_results, ignore_index=True)
+    combined.to_csv(MODEL_RESULTS_CSV, index=False)
+    return combined
 
 # Load data
 df = load_data()
-model_results = load_model_results()
+model_results = load_model_results(df)
 
 # Main UI
 st.markdown('<div class="main-header">🧠 Glioma Grading Clinical and Mutation Explorer</div>', unsafe_allow_html=True)
@@ -477,6 +662,19 @@ elif page == "Correlations":
 # ML Model Results Tab
 elif page == "ML Model Results":
     st.markdown('<div class="sub-header">🤖 Machine Learning Model Results</div>', unsafe_allow_html=True)
+
+    with st.expander("Modeling setup", expanded=False):
+        st.write("- Train/Test split: 70% / 30% (stratified)")
+        st.write("- Cross-validation: 10-fold Stratified CV on training data")
+        st.write(f"- Results source: {MODEL_RESULTS_CSV.name}")
+        if not XGBOOST_AVAILABLE:
+            st.info("XGBoost package is not installed; XGBoost results are skipped.")
+
+    if st.button("Rebuild model results", type="secondary"):
+        load_model_results.clear()
+        build_and_store_model_results.clear()
+        model_results = load_model_results(df, force_rebuild=True)
+        st.success("Model results rebuilt and saved to CSV.")
     
     # Model selection
     col1, col2, col3 = st.columns([1, 1, 1])
@@ -547,7 +745,7 @@ elif page == "ML Model Results":
         # Performance Table
         st.markdown("### Model Performance Details")
         
-        display_cols = ['model_type', 'mean', 'std_err', 'n', '.config']
+        display_cols = ['model_type', 'mean', 'std_err', 'test_auc', 'n', '.config', 'train_rows', 'test_rows', 'cv_folds']
         available_cols = [col for col in display_cols if col in filtered_results.columns]
         
         # Add hyperparameter columns
@@ -555,8 +753,12 @@ elif page == "ML Model Results":
         available_hyper = [col for col in hyperparam_cols if col in filtered_results.columns]
         
         display_df = filtered_results[available_cols + available_hyper].copy()
-        display_df['mean'] = display_df['mean'].round(4)
-        display_df['std_err'] = display_df['std_err'].round(4)
+        if 'mean' in display_df.columns:
+            display_df['mean'] = display_df['mean'].round(4)
+        if 'std_err' in display_df.columns:
+            display_df['std_err'] = display_df['std_err'].round(4)
+        if 'test_auc' in display_df.columns:
+            display_df['test_auc'] = display_df['test_auc'].round(4)
         display_df = display_df.sort_values('mean', ascending=False)
         
         # Rename columns for display
@@ -564,6 +766,7 @@ elif page == "ML Model Results":
             'model_type': 'Model Type',
             'mean': 'ROC-AUC',
             'std_err': 'Std Error',
+            'test_auc': 'Test ROC-AUC',
             'n': 'N',
             '.config': 'Config'
         }
