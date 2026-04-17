@@ -1,0 +1,25 @@
+Column,Definition
+Gender,Patient’s gender Male/Female
+Age_at_diagnosis,Age of the patient in years when the tumor was first diagnosed
+Race,Patient’s self-identified racial or ethnic group
+IDH1,Whether a mutation is present in the IDH1 gene which affects how tumor cells process energy and helps classify brain tumors (0 = no mutation 1 = mutation present)
+TP53,Whether a mutation is present in the TP53 gene which normally prevents damaged cells from growing uncontrollably (0 = no mutation 1 = mutation present)
+ATRX,Whether a mutation is present in the ATRX gene which helps maintain DNA structure and stability (0 = no mutation 1 = mutation present)
+PTEN,Whether a mutation is present in the PTEN gene which helps control cell growth and division (0 = no mutation 1 = mutation present)
+EGFR,Whether a mutation or amplification is present in the EGFR gene which promotes tumor cell growth signals (0 = no mutation 1 = mutation present)
+CIC,Whether a mutation is present in the CIC gene which regulates gene activity (0 = no mutation 1 = mutation present)
+MUC16,Whether a mutation is present in the MUC16 gene which is involved in cell surface protection and signaling (0 = no mutation 1 = mutation present)
+PIK3CA,Whether a mutation is present in the PIK3CA gene which promotes cell growth and survival (0 = no mutation 1 = mutation present)
+NF1,Whether a mutation is present in the NF1 gene which helps limit cell growth signals (0 = no mutation 1 = mutation present)
+PIK3R1,Whether a mutation is present in the PIK3R1 gene which regulates cell growth pathways (0 = no mutation 1 = mutation present)
+FUBP1,Whether a mutation is present in the FUBP1 gene which helps control gene activity (0 = no mutation 1 = mutation present)
+RB1,Whether a mutation is present in the RB1 gene which prevents cells from dividing too quickly (0 = no mutation 1 = mutation present)
+NOTCH1,Whether a mutation is present in the NOTCH1 gene which influences cell development and communication (0 = no mutation 1 = mutation present)
+BCOR,Whether a mutation is present in the BCOR gene which regulates gene expression (0 = no mutation 1 = mutation present)
+CSMD3,Whether a mutation is present in the CSMD3 gene which may play a role in cell signaling and tumor development (0 = no mutation 1 = mutation present)
+SMARCA4,Whether a mutation is present in the SMARCA4 gene which controls how DNA is packaged and accessed (0 = no mutation 1 = mutation present)
+GRIN2A,Whether a mutation is present in the GRIN2A gene which is involved in brain cell signaling (0 = no mutation 1 = mutation present)
+IDH2,Whether a mutation is present in the IDH2 gene similar to IDH1 and relevant for tumor classification (0 = no mutation 1 = mutation present)
+FAT4,Whether a mutation is present in the FAT4 gene which helps regulate cell growth and structure (0 = no mutation 1 = mutation present)
+PDGFRA,Whether a mutation or amplification is present in the PDGFRA gene which promotes cell growth signals (0 = no mutation 1 = mutation present)
+Grade,A measure of how aggressive the tumor is based on how abnormal the cells look (lower grade slower growing higher grade more aggressive)
