@@ -14,6 +14,7 @@ import seaborn as sns
 from ucimlrepo import fetch_ucirepo
 from sklearn.preprocessing import LabelEncoder
 from sklearn.model_selection import train_test_split, StratifiedKFold, GridSearchCV
+from sklearn.model_selection import ParameterGrid
 from sklearn.compose import ColumnTransformer
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OneHotEncoder, StandardScaler
@@ -62,35 +63,6 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# Cache data loading
-def create_fallback_data(n_rows: int = 200) -> pd.DataFrame:
-    """Create a local synthetic dataset when the remote UCI source is unavailable."""
-    rng = np.random.default_rng(42)
-
-    df = pd.DataFrame({
-        'patient_id': [f'P{i:04d}' for i in range(1, n_rows + 1)],
-        'age': rng.integers(18, 80, n_rows),
-        'tumor_volume': rng.normal(35, 12, n_rows).clip(2, 90),
-        'karnofsky_score': rng.integers(40, 100, n_rows),
-        'mutation_burden': rng.normal(8, 3, n_rows).clip(0, 20),
-        'idh_expression': rng.normal(0.5, 0.18, n_rows).clip(0, 1),
-        'mgmt_methylation': rng.normal(0.55, 0.2, n_rows).clip(0, 1),
-        'tumor_size': rng.normal(4.5, 1.8, n_rows).clip(0.5, 12),
-        'wbc': rng.normal(7.1, 1.4, n_rows).clip(3, 15),
-        'sex': rng.choice(['Female', 'Male'], n_rows),
-        'tumor_location': rng.choice(['Frontal', 'Temporal', 'Parietal', 'Occipital'], n_rows),
-        'histology': rng.choice(['Astrocytoma', 'Oligodendroglioma', 'Glioblastoma'], n_rows),
-        'treatment': rng.choice(['Surgery', 'Radiation', 'Chemotherapy', 'Combined'], n_rows),
-        'grade': rng.choice(['LGG', 'HGG'], n_rows, p=[0.45, 0.55])
-    })
-
-    categorical_cols = df.select_dtypes(include=['object', 'string']).columns
-    for col in categorical_cols:
-        df[col] = df[col].astype('category')
-
-    return df
-
-
 @st.cache_data
 def load_data():
     """Load and prepare the glioma dataset"""
@@ -110,9 +82,8 @@ def load_data():
             df[col] = df[col].astype('category')
 
         return df
-    except Exception:
-        return create_fallback_data()
-
+    except Exception as exc:
+        raise RuntimeError('Failed to load data from ucimlrepo (dataset id=759).') from exc
 
 def is_binary_indicator(series: pd.Series) -> bool:
     """Return True when a series only contains 0/1 values (ignoring missing values)."""
@@ -153,96 +124,48 @@ def to_binary_category(series: pd.Series) -> pd.Series:
 
 
 def build_column_definitions(dataframe: pd.DataFrame) -> pd.DataFrame:
-    """Build a compact column dictionary for display in the Data Table tab."""
-    definitions_lookup = load_column_definitions_lookup(
+    """Read column definitions strictly from CSV and keep only dataset columns."""
+    defs = load_column_definitions_csv(
         Path(__file__).with_name('column_definitions.csv')
     )
 
-    definitions = []
-    total_rows = len(dataframe)
+    if defs.empty:
+        return defs
 
-    for col in dataframe.columns:
-        series = dataframe[col]
-        if is_binary_indicator(series):
-            semantic_type = 'Binary'
-        elif pd.api.types.is_numeric_dtype(series):
-            semantic_type = 'Numeric'
-        elif pd.api.types.is_bool_dtype(series):
-            semantic_type = 'Boolean'
-        else:
-            semantic_type = 'Categorical'
+    if dataframe is None or dataframe.empty:
+        return defs
 
-        missing = int(series.isna().sum())
-        missing_pct = (missing / total_rows * 100) if total_rows else 0
-        narrative = definitions_lookup.get(
-            col.lower(),
-            generate_definition_from_column(col, semantic_type)
-        )
-
-        definitions.append({
-            'Column': col,
-            'Definition': narrative,
-            'Type': semantic_type,
-            'Missing%': f'{missing_pct:.1f}',
-            'Unique': int(series.nunique(dropna=True))
-        })
-
-    return pd.DataFrame(definitions)
+    available_columns = {col.lower(): col for col in dataframe.columns}
+    defs = defs[defs['Column'].str.lower().isin(available_columns.keys())].copy()
+    defs['Column'] = defs['Column'].str.lower().map(available_columns)
+    return defs
 
 
-def generate_definition_from_column(column_name: str, semantic_type: str) -> str:
-    """Generate a readable fallback definition when CSV narrative is missing."""
-    words = column_name.replace('_', ' ').strip()
-
-    if not words:
-        return 'Auto-generated definition for an unnamed column.'
-
-    if words.lower().endswith('id') or words.lower().startswith('id '):
-        return f'Identifier field for {words}.'
-
-    if semantic_type == 'Binary':
-        return f'Binary indicator for {words} (typically 0/1 or No/Yes).'
-
-    if semantic_type == 'Numeric':
-        return f'Numeric measurement of {words}.'
-
-    if semantic_type == 'Categorical':
-        return f'Category label describing {words}.'
-
-    if semantic_type == 'Boolean':
-        return f'True/False flag for {words}.'
-
-    return f'Auto-generated description for {words}.'
-
-
-def load_column_definitions_lookup(csv_path: Path) -> dict:
-    """Read narrative column definitions from CSV and return a lowercase lookup."""
+def load_column_definitions_csv(csv_path: Path) -> pd.DataFrame:
+    """Read narrative column definitions from CSV."""
     if not csv_path.exists():
-        return {}
+        return pd.DataFrame(columns=['Column', 'Definition'])
 
     try:
         defs = pd.read_csv(csv_path)
     except Exception:
-        return {}
+        return pd.DataFrame(columns=['Column', 'Definition'])
 
     required_cols = {'Column', 'Definition'}
     if not required_cols.issubset(set(defs.columns)):
-        return {}
+        return pd.DataFrame(columns=['Column', 'Definition'])
 
     defs = defs.dropna(subset=['Column'])
     defs['Column'] = defs['Column'].astype(str).str.strip()
     defs['Definition'] = defs['Definition'].fillna('').astype(str).str.strip()
-
-    return {
-        row['Column'].lower(): row['Definition']
-        for _, row in defs.iterrows()
-        if row['Column']
-    }
+    defs = defs[['Column', 'Definition']]
+    defs = defs[defs['Column'] != '']
+    return defs
 
 @st.cache_data
 def load_model_results(dataframe: pd.DataFrame, force_rebuild: bool = False) -> pd.DataFrame:
     """Load model results from CSV, or build/train models and save results first."""
-    required_cols = {'model_type', 'mean', 'std_err', 'n', '.config', 'test_auc'}
+    required_cols = {'model_type', 'mean', 'std_err', 'n', '.config', 'auc_source'}
 
     if MODEL_RESULTS_CSV.exists() and not force_rebuild:
         try:
@@ -279,38 +202,35 @@ def _fit_and_collect_results(
     y_test: np.ndarray,
     cv
 ) -> pd.DataFrame:
-    """Fit a CV model search and collect all grid results plus test AUC for best model."""
+    """Fit each configuration on train data and collect test ROC-AUC for every config."""
     pipe = Pipeline([
         ('preprocess', preprocessor),
         ('model', estimator)
     ])
 
-    search = GridSearchCV(
-        estimator=pipe,
-        param_grid=param_grid,
-        scoring='roc_auc',
-        cv=cv,
-        n_jobs=-1,
-        return_train_score=False,
-        refit=True
-    )
-    search.fit(X_train, y_train)
-
-    y_proba = search.best_estimator_.predict_proba(X_test)[:, 1]
-    test_auc = roc_auc_score(y_test, y_proba)
-
     rows = []
-    cv_results = pd.DataFrame(search.cv_results_)
-    for idx, row in cv_results.iterrows():
-        params = row['params']
+    all_params = list(ParameterGrid(param_grid))
+    best_auc = -np.inf
+    best_idx = -1
+
+    for idx, params in enumerate(all_params, start=1):
+        configured_pipe = pipe.set_params(**params)
+        configured_pipe.fit(X_train, y_train)
+
+        y_proba = configured_pipe.predict_proba(X_test)[:, 1]
+        test_auc = float(roc_auc_score(y_test, y_proba))
+        if test_auc > best_auc:
+            best_auc = test_auc
+            best_idx = idx
+
         result_row = {
             'model_type': model_type,
-            'mean': float(row['mean_test_score']),
-            'std_err': float(row['std_test_score'] / np.sqrt(cv.get_n_splits())),
+            'mean': test_auc,
+            'std_err': 0.0,
             'n': int(len(X_train)),
-            '.config': f'{model_type.replace(" ", "_")}_{idx + 1}',
-            'is_best': bool(row['rank_test_score'] == 1),
-            'test_auc': float(test_auc if row['rank_test_score'] == 1 else np.nan),
+            '.config': f'{model_type.replace(" ", "_")}_{idx}',
+            'is_best': False,
+            'auc_source': 'test',
             'train_rows': int(len(X_train)),
             'test_rows': int(len(X_test)),
             'cv_folds': int(cv.get_n_splits())
@@ -330,6 +250,9 @@ def _fit_and_collect_results(
             result_row['mtry'] = params.get('model__colsample_bytree')
 
         rows.append(result_row)
+
+    if rows and best_idx > 0:
+        rows[best_idx - 1]['is_best'] = True
 
     return pd.DataFrame(rows)
 
@@ -458,7 +381,12 @@ def build_and_store_model_results(dataframe: pd.DataFrame) -> pd.DataFrame:
     return combined
 
 # Load data
-df = load_data()
+try:
+    df = load_data()
+except Exception as exc:
+    st.error(str(exc))
+    st.stop()
+
 model_results = load_model_results(df)
 
 # Main UI
@@ -746,6 +674,7 @@ elif page == "ML Model Results":
         st.markdown("### Model Performance Details")
         
         display_cols = ['model_type', 'mean', 'std_err', 'test_auc', 'n', '.config', 'train_rows', 'test_rows', 'cv_folds']
+        display_cols = ['model_type', 'mean', 'std_err', 'n', '.config', 'train_rows', 'test_rows', 'cv_folds', 'auc_source']
         available_cols = [col for col in display_cols if col in filtered_results.columns]
         
         # Add hyperparameter columns
@@ -757,8 +686,6 @@ elif page == "ML Model Results":
             display_df['mean'] = display_df['mean'].round(4)
         if 'std_err' in display_df.columns:
             display_df['std_err'] = display_df['std_err'].round(4)
-        if 'test_auc' in display_df.columns:
-            display_df['test_auc'] = display_df['test_auc'].round(4)
         display_df = display_df.sort_values('mean', ascending=False)
         
         # Rename columns for display
@@ -766,7 +693,6 @@ elif page == "ML Model Results":
             'model_type': 'Model Type',
             'mean': 'ROC-AUC',
             'std_err': 'Std Error',
-            'test_auc': 'Test ROC-AUC',
             'n': 'N',
             '.config': 'Config'
         }
